@@ -4,12 +4,37 @@ Enumerates all read-only networking resources across one or more regions.
 Pure Describe/List calls only; requires read-only IAM access.
 """
 
+import sys
+
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError
+
+# Strict client configuration so a single slow/stalled call does not hang the
+# whole audit for minutes. connect_timeout guards TCP setup, read_timeout caps
+# how long we wait for each response, and adaptive retries avoid hammering
+# throttled APIs (which is a common cause of long stalls).
+CLIENT_CONFIG = Config(
+    retries={"max_attempts": 3, "mode": "adaptive"},
+    connect_timeout=5,
+    read_timeout=30,
+    tcp_keepalive=True,
+)
+
+# Maximum number of results per page for paginated calls. Accounts with more
+# resources (e.g. thousands of instances/route tables) need pagination to be
+# fully enumerated instead of returning a single truncated page.
+PAGE_SIZE = 200
 
 
 class DiscoveryError(Exception):
     """Raised when an AWS discovery call fails in a non-recoverable way."""
+
+
+def log(message):
+    """Print a status line to stderr (flushed) so progress is visible even
+    when stdout is redirected. Prevents the tool from looking frozen."""
+    print(message, file=sys.stderr, flush=True)
 
 
 def _safe_call(func, *args, region=None, **kwargs):
@@ -63,8 +88,12 @@ class AWSDiscovery:
         }
         self.regions = regions or self._discover_regions()
 
+    def _client(self, service, region):
+        """Create a client with the shared strict timeout/retry config."""
+        return self.session.client(service, region_name=region, config=CLIENT_CONFIG)
+
     def _discover_regions(self):
-        ec2 = self.session.client("ec2", region_name="us-east-1")
+        ec2 = self._client("ec2", "us-east-1")
         try:
             resp = ec2.describe_regions()
             return [r["RegionName"] for r in resp["Regions"]]
@@ -76,6 +105,32 @@ class AWSDiscovery:
 
     def record_error(self, region, what, message):
         self.data["errors"].append(f"[{region}] {what}: {message}")
+
+    def _begin(self, region, what):
+        """Emit a progress line for a discovery step so the run never looks
+        frozen, especially on slow or large accounts."""
+        log(f"  [{region}] {what} ...")
+
+    def _paginate(self, client, op_name, result_key):
+        """Yield every item across all pages of a paginated API call.
+
+        Handles both real paginators and our own NextToken-style fallback.
+        All collected items are returned as a list.
+        """
+        try:
+            paginator = client.get_paginator(op_name)
+            items = []
+            for page in paginator.paginate(PaginationConfig={
+                "PageSize": PAGE_SIZE,
+            }):
+                items.extend(page.get(result_key, []))
+            return items, None
+        except (ClientError, Exception) as exc:
+            if isinstance(exc, ClientError):
+                code = exc.response.get("Error", {}).get("Code", "Unknown")
+                if code in ("AccessDenied", "UnauthorizedOperation", "OptInRequired"):
+                    return None, f"Access denied ({code})"
+            return None, str(exc)
 
     def _vpc_summary(self, vpc, region):
         name = ""
@@ -93,22 +148,24 @@ class AWSDiscovery:
         }
 
     def discover_vpcs(self, region):
-        client = self.session.client("ec2", region_name=region)
-        resp, err = _safe_call(client.describe_vpcs)
+        client = self._client("ec2", region)
+        self._begin(region, "VPCs")
+        vpcs, err = self._paginate(client, "describe_vpcs", "Vpcs")
         if err:
             self.record_error(region, "describe-vpcs", err)
             return
-        for vpc in resp["Vpcs"]:
+        for vpc in vpcs:
             summary = self._vpc_summary(vpc, region)
             self.data["vpcs"][vpc["VpcId"]] = summary
 
     def discover_subnets(self, region):
-        client = self.session.client("ec2", region_name=region)
-        resp, err = _safe_call(client.describe_subnets)
+        client = self._client("ec2", region)
+        self._begin(region, "Subnets")
+        subnets, err = self._paginate(client, "describe_subnets", "Subnets")
         if err:
             self.record_error(region, "describe-subnets", err)
             return
-        for subnet in resp["Subnets"]:
+        for subnet in subnets:
             vpc_id = subnet["VpcId"]
             name = next(
                 (t["Value"] for t in subnet.get("Tags", []) if t["Key"] == "Name"),
@@ -124,12 +181,13 @@ class AWSDiscovery:
             }
 
     def discover_route_tables(self, region):
-        client = self.session.client("ec2", region_name=region)
-        resp, err = _safe_call(client.describe_route_tables)
+        client = self._client("ec2", region)
+        self._begin(region, "Route tables")
+        rts, err = self._paginate(client, "describe_route_tables", "RouteTables")
         if err:
             self.record_error(region, "describe-route-tables", err)
             return
-        for rt in resp["RouteTables"]:
+        for rt in rts:
             vpc_id = rt["VpcId"]
             routes = []
             for route in rt.get("Routes", []):
@@ -170,12 +228,13 @@ class AWSDiscovery:
             }
 
     def discover_security_groups(self, region):
-        client = self.session.client("ec2", region_name=region)
-        resp, err = _safe_call(client.describe_security_groups)
+        client = self._client("ec2", region)
+        self._begin(region, "Security groups")
+        sgroups, err = self._paginate(client, "describe_security_groups", "SecurityGroups")
         if err:
             self.record_error(region, "describe-security-groups", err)
             return
-        for sg in resp["SecurityGroups"]:
+        for sg in sgroups:
             vpc_id = sg.get("VpcId", "")
             ingress = [
                 self._normalize_rule(r)
@@ -231,12 +290,13 @@ class AWSDiscovery:
         }
 
     def discover_network_acls(self, region):
-        client = self.session.client("ec2", region_name=region)
-        resp, err = _safe_call(client.describe_network_acls)
+        client = self._client("ec2", region)
+        self._begin(region, "Network ACLs")
+        nacls, err = self._paginate(client, "describe_network_acls", "NetworkAcls")
         if err:
             self.record_error(region, "describe-network-acls", err)
             return
-        for nacl in resp["NetworkAcls"]:
+        for nacl in nacls:
             vpc_id = nacl["VpcId"]
             entries = []
             for entry in sorted(
@@ -262,12 +322,15 @@ class AWSDiscovery:
             }
 
     def discover_instances(self, region):
-        client = self.session.client("ec2", region_name=region)
-        resp, err = _safe_call(client.describe_instances)
+        client = self._client("ec2", region)
+        self._begin(region, "EC2 instances")
+        reservations, err = self._paginate(
+            client, "describe_instances", "Reservations"
+        )
         if err:
             self.record_error(region, "describe-instances", err)
             return
-        for reservation in resp.get("Reservations", []):
+        for reservation in reservations:
             for inst in reservation.get("Instances", []):
                 if inst.get("State", {}).get("Name") == "terminated":
                     continue
@@ -294,12 +357,13 @@ class AWSDiscovery:
                 }
 
     def discover_nat_gateways(self, region):
-        client = self.session.client("ec2", region_name=region)
-        resp, err = _safe_call(client.describe_nat_gateways)
+        client = self._client("ec2", region)
+        self._begin(region, "NAT gateways")
+        ngws, err = self._paginate(client, "describe_nat_gateways", "NatGateways")
         if err:
             self.record_error(region, "describe-nat-gateways", err)
             return
-        for ngw in resp.get("NatGateways", []):
+        for ngw in ngws:
             if ngw.get("State") == "deleted":
                 continue
             self.data["nat_gateways"][ngw["NatGatewayId"]] = {
@@ -311,12 +375,15 @@ class AWSDiscovery:
             }
 
     def discover_internet_gateways(self, region):
-        client = self.session.client("ec2", region_name=region)
-        resp, err = _safe_call(client.describe_internet_gateways)
+        client = self._client("ec2", region)
+        self._begin(region, "Internet gateways")
+        igws, err = self._paginate(
+            client, "describe_internet_gateways", "InternetGateways"
+        )
         if err:
             self.record_error(region, "describe-internet-gateways", err)
             return
-        for igw in resp.get("InternetGateways", []):
+        for igw in igws:
             for att in igw.get("Attachments", []):
                 vpc_id = att.get("VpcId")
                 if vpc_id and att.get("State") == "available":
@@ -327,28 +394,33 @@ class AWSDiscovery:
                     }
 
     def discover_vpc_endpoints(self, region):
-        client = self.session.client("ec2", region_name=region)
-        paginator = client.get_paginator("describe_vpc_endpoints")
-        try:
-            for page in paginator.paginate():
-                for ep in page.get("VpcEndpoints", []):
-                    self.data["vpc_endpoints"][ep["VpcEndpointId"]] = {
-                        "id": ep["VpcEndpointId"],
-                        "vpc_id": ep.get("VpcId", ""),
-                        "service": ep.get("ServiceName", ""),
-                        "type": ep.get("VpcEndpointType", ""),
-                        "region": region,
-                    }
-        except ClientError as exc:
-            self.record_error(region, "describe-vpc-endpoints", str(exc))
+        client = self._client("ec2", region)
+        self._begin(region, "VPC endpoints")
+        endpoints, err = self._paginate(
+            client, "describe_vpc_endpoints", "VpcEndpoints"
+        )
+        if err:
+            self.record_error(region, "describe-vpc-endpoints", err)
+            return
+        for ep in endpoints:
+            self.data["vpc_endpoints"][ep["VpcEndpointId"]] = {
+                "id": ep["VpcEndpointId"],
+                "vpc_id": ep.get("VpcId", ""),
+                "service": ep.get("ServiceName", ""),
+                "type": ep.get("VpcEndpointType", ""),
+                "region": region,
+            }
 
     def discover_peering_connections(self, region):
-        client = self.session.client("ec2", region_name=region)
-        resp, err = _safe_call(client.describe_vpc_peering_connections)
+        client = self._client("ec2", region)
+        self._begin(region, "VPC peering")
+        peerings, err = self._paginate(
+            client, "describe_vpc_peering_connections", "VpcPeeringConnections"
+        )
         if err:
             self.record_error(region, "describe-vpc-peering", err)
             return
-        for peering in resp.get("VpcPeeringConnections", []):
+        for peering in peerings:
             if peering.get("Status", {}).get("Code") in ("deleted", "expired", "failed"):
                 continue
             self.data["peering_connections"][peering["VpcPeeringConnectionId"]] = {
@@ -360,13 +432,14 @@ class AWSDiscovery:
             }
 
     def discover_transit_gateways(self, region):
-        client = self.session.client("ec2", region_name=region)
-        resp, err = _safe_call(client.describe_transit_gateways)
+        client = self._client("ec2", region)
+        self._begin(region, "Transit gateways")
+        tgws, err = self._paginate(client, "describe_transit_gateways", "TransitGateways")
         if err:
             self.record_error(region, "describe-transit-gateways", err)
             return
         tgw_ids = []
-        for tgw in resp.get("TransitGateways", []):
+        for tgw in tgws:
             if tgw.get("State") == "deleted":
                 continue
             self.data["transit_gateways"][tgw["TransitGatewayId"]] = {
@@ -381,13 +454,7 @@ class AWSDiscovery:
             self._discover_tgw_attachments(client, tgw_id, region)
 
     def _discover_tgw_attachments(self, client, tgw_id, region):
-        try:
-            att_resp = client.describe_transit_gateway_attachments(
-                Filters=[{
-                    "Name": "transit-gateway-id",
-                    "Values": [tgw_id],
-                }]
-            )
+        def _record(att_resp):
             for att in att_resp.get("TransitGatewayAttachments", []):
                 if att.get("State") == "deleted":
                     continue
@@ -401,6 +468,16 @@ class AWSDiscovery:
                     "resource_type": rtype,
                     "vpc_id": self._attachment_to_vpc(att, resource, rtype),
                 }
+
+        try:
+            paginator = client.get_paginator("describe_transit_gateway_attachments")
+            for page in paginator.paginate(
+                Filters=[{
+                    "Name": "transit-gateway-id",
+                    "Values": [tgw_id],
+                }]
+            ):
+                _record(page)
         except ClientError:
             # Attachment-level permission errors are tolerated
             pass
@@ -411,66 +488,69 @@ class AWSDiscovery:
         return None
 
     def discover_load_balancers(self, region):
-        try:
-            client = self.session.client("elbv2", region_name=region)
-            paginator = client.get_paginator("describe_load_balancers")
-            for page in paginator.paginate():
-                for lb in page.get("LoadBalancers", []):
-                    if lb.get("State", {}).get("Code") == "active":
-                        self.data["load_balancers"][lb["LoadBalancerArn"]] = {
-                            "id": lb["LoadBalancerArn"].rsplit("/", 1)[-1],
-                            "name": lb.get("LoadBalancerName", ""),
-                            "type": lb.get("Type", ""),
-                            "vpc_id": lb.get("VpcId", ""),
-                            "scheme": lb.get("Scheme", ""),
-                            "region": region,
-                        }
-        except ClientError as exc:
-            self.record_error(region, "describe-load-balancers", str(exc))
+        client = self._client("elbv2", region)
+        self._begin(region, "Load balancers")
+        lbs, err = self._paginate(client, "describe_load_balancers", "LoadBalancers")
+        if err:
+            self.record_error(region, "describe-load-balancers", err)
+            return
+        for lb in lbs:
+            if lb.get("State", {}).get("Code") == "active":
+                self.data["load_balancers"][lb["LoadBalancerArn"]] = {
+                    "id": lb["LoadBalancerArn"].rsplit("/", 1)[-1],
+                    "name": lb.get("LoadBalancerName", ""),
+                    "type": lb.get("Type", ""),
+                    "vpc_id": lb.get("VpcId", ""),
+                    "scheme": lb.get("Scheme", ""),
+                    "region": region,
+                }
 
     def discover_rds_instances(self, region):
-        try:
-            client = self.session.client("rds", region_name=region)
-            paginator = client.get_paginator("describe_db_instances")
-            for page in paginator.paginate():
-                for db in page.get("DBInstances", []):
-                    if db.get("DBInstanceStatus") == "deleted":
-                        continue
-                    self.data["rds_instances"][db["DBInstanceIdentifier"]] = {
-                        "id": db["DBInstanceIdentifier"],
-                        "vpc_id": db.get("DBSubnetGroup", {}).get("VpcId", ""),
-                        "sg_ids": [
-                            sg["VpcSecurityGroupId"]
-                            for sg in db.get("VpcSecurityGroups", [])
-                            if sg.get("Status") == "active"
-                        ],
-                        "engine": db.get("Engine", ""),
-                        "region": region,
-                    }
-        except ClientError as exc:
-            self.record_error(region, "describe-db-instances", str(exc))
+        client = self._client("rds", region)
+        self._begin(region, "RDS instances")
+        dbs, err = self._paginate(client, "describe_db_instances", "DBInstances")
+        if err:
+            self.record_error(region, "describe-db-instances", err)
+            return
+        for db in dbs:
+            if db.get("DBInstanceStatus") == "deleted":
+                continue
+            self.data["rds_instances"][db["DBInstanceIdentifier"]] = {
+                "id": db["DBInstanceIdentifier"],
+                "vpc_id": db.get("DBSubnetGroup", {}).get("VpcId", ""),
+                "sg_ids": [
+                    sg["VpcSecurityGroupId"]
+                    for sg in db.get("VpcSecurityGroups", [])
+                    if sg.get("Status") == "active"
+                ],
+                "engine": db.get("Engine", ""),
+                "region": region,
+            }
 
     def discover_elasticache_clusters(self, region):
-        try:
-            client = self.session.client("elasticache", region_name=region)
-            paginator = client.get_paginator("describe_cache_clusters")
-            for page in paginator.paginate():
-                for cluster in page.get("CacheClusters", []):
-                    self.data["elasticache_clusters"][cluster["CacheClusterId"]] = {
-                        "id": cluster["CacheClusterId"],
-                        "sg_ids": [
-                            sg["SecurityGroupId"]
-                            for sg in cluster.get("SecurityGroups", [])
-                        ],
-                        "engine": cluster.get("Engine", ""),
-                        "region": region,
-                    }
-        except ClientError as exc:
-            self.record_error(region, "describe-cache-clusters", str(exc))
+        client = self._client("elasticache", region)
+        self._begin(region, "ElastiCache clusters")
+        clusters, err = self._paginate(
+            client, "describe_cache_clusters", "CacheClusters"
+        )
+        if err:
+            self.record_error(region, "describe-cache-clusters", err)
+            return
+        for cluster in clusters:
+            self.data["elasticache_clusters"][cluster["CacheClusterId"]] = {
+                "id": cluster["CacheClusterId"],
+                "sg_ids": [
+                    sg["SecurityGroupId"]
+                    for sg in cluster.get("SecurityGroups", [])
+                ],
+                "engine": cluster.get("Engine", ""),
+                "region": region,
+            }
 
     def discover_region(self, region):
         """Run all discovery methods for a single region."""
         self.data["regions"].append(region)
+        log(f"\n== Region: {region} ==")
         self.discover_vpcs(region)
         self.discover_subnets(region)
         self.discover_route_tables(region)
@@ -485,8 +565,12 @@ class AWSDiscovery:
         self.discover_load_balancers(region)
         self.discover_rds_instances(region)
         self.discover_elasticache_clusters(region)
+        log(f"  [region]{region} done "
+            f"({len(self.data['vpcs'])} VPCs / "
+            f"{len(self.data['instances'])} EC2 so far)")
 
     def run(self):
+        log("Discovering networking resources...")
         for region in self.regions:
             self.discover_region(region)
         return self.data
