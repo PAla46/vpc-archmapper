@@ -14,8 +14,10 @@ Requires read-only IAM permissions only. Runs natively in AWS CloudShell
 (boto3 is pre-installed) or locally with `pip install boto3`.
 
 Usage:
-    python3 audit.py
+    python3 audit.py                      # all regions
+    python3 audit.py --region all         # all regions (explicit)
     python3 audit.py --region us-east-1
+    python3 audit.py --region us-east-1,us-west-2
     python3 audit.py --output ./my-report
     python3 audit.py --profile my-profile --region us-east-1,us-west-2
 """
@@ -58,8 +60,15 @@ def parse_args():
     )
     parser.add_argument(
         "--region",
-        help="Comma-separated list of regions, e.g. us-east-1,us-west-2. "
+        help="Regions to scan. Accepts a comma-separated list, e.g. "
+        "us-east-1,us-west-2, or 'all' to scan every region. "
         "Defaults to all regions.",
+    )
+    parser.add_argument(
+        "-r",
+        "--regions",
+        dest="region",
+        help="Alias for --region.",
     )
     parser.add_argument(
         "--output",
@@ -77,10 +86,16 @@ def parse_args():
 
 
 def resolve_regions(region_arg):
+    """Return the list of regions to scan ('all' -> None, meaning every region)."""
     if not region_arg:
         return None
-    regions = [r.strip() for r in region_arg.split(",") if r.strip()]
-    return regions or None
+    values = [r.strip() for r in region_arg.split(",") if r.strip()]
+    if not values:
+        return None
+    # 'all' (any case) explicitly means "scan every region".
+    if any(v.lower() == "all" for v in values):
+        return None
+    return values
 
 
 def main():

@@ -104,11 +104,15 @@ python3 audit.py
 
 ```bash
 python3 audit.py                              # all regions
+python3 audit.py --region all                 # all regions (explicit)
 python3 audit.py --region us-east-1           # single region
 python3 audit.py --region us-east-1,us-west-2 # multiple regions
 python3 audit.py --output ./my-report         # custom output directory
 python3 audit.py --profile my-auditor         # explicit AWS CLI profile
 ```
+
+`--region` accepts a comma-separated list or the keyword `all` (scan every
+region). Omitting `--region`/`--regions` also scans all regions.
 
 The tool writes three files to the output directory (default `output/`), all
 sharing a timestamp prefix (`vpc-archmap-<timestamp>`):
