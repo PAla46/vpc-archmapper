@@ -2,8 +2,8 @@
 
 Read-only AWS **VPC network audit** and **architecture mapper**. Scans all (or
 specific) regions for networking resources, analyzes how resources connect to
-each other, flags common misconfigurations, and produces a single self-contained
-**HTML report** with an interactive **Mermaid** architecture diagram.
+each other, flags common misconfigurations, and produces **three deliverables
+centred on an elaborate, intuitive network architecture diagram**.
 
 Built to satisfy the kind of client feedback: *"you didn't properly check the
 route tables and the interconnection of network between all services."*
@@ -30,8 +30,11 @@ route tables and the interconnection of network between all services."*
   - Misplaced NAT gateways
 - **Single unified Mermaid diagram** — VPCs, subnets, resources and their
   interconnections, with high-severity issues highlighted in red
-- **Single HTML output** — diagram + findings + full SG/route-table detail,
-  browser-viewable and print-friendly
+- **Three outputs** (diagram is the primary focus):
+  1. `*-diagram.html` — pure, interactive architecture diagram
+  2. `*-diagram.mmd` — raw Mermaid code, importable into Excalidraw /
+     Mermaid Live Editor / Mermaid Ink for editing or export
+  3. `*-findings.html` — security findings & audit detail (secondary)
 - **Read-only** — uses only AWS `Describe`/`List` APIs, never modifies anything
 
 ---
@@ -107,7 +110,14 @@ python3 audit.py --output ./my-report         # custom output directory
 python3 audit.py --profile my-auditor         # explicit AWS CLI profile
 ```
 
-The report is written to `output/audit-report-<timestamp>.html`.
+The tool writes three files to the output directory (default `output/`), all
+sharing a timestamp prefix (`vpc-archmap-<timestamp>`):
+
+| File | Purpose |
+|------|---------|
+| `vpc-archmap-<ts>-diagram.html` | **Primary** — pure, interactive architecture diagram (pan/zoom) |
+| `vpc-archmap-<ts>-diagram.mmd`  | Raw Mermaid code — import into Excalidraw, Mermaid Live Editor, Mermaid Ink |
+| `vpc-archmap-<ts>-findings.html` | **Secondary** — security findings, summary, SG/route-table detail |
 
 ---
 
@@ -121,21 +131,23 @@ vpc-archmapper/
 │   ├── analysis.py       # Connectivity graph + subnet/routing analysis
 │   ├── issues.py         # Misconfiguration detection
 │   ├── mermaid.py        # Mermaid diagram generation
-│   └── html_report.py    # HTML report templating
+│   └── html_report.py    # Diagram / findings / .mmd output writers
 ├── README.md
-└── output/               # Generated reports
+└── output/               # Generated deliverables
 ```
 
 ---
 
 ## 🖥️ Output
 
-Open the generated HTML file in any browser for:
-- **Interactive architecture diagram** (pan/zoom via mouse/trackpad)
-- **Summary cards** — resource counts + issue totals by severity
-- **Findings table** — every issue with severity, affected resource and a fix
-- **Security group details** — full inbound/outbound rules
-- **Route table details** — every route with destination, target and state
+- **`*-diagram.html`** — open in any browser for the interactive architecture
+  diagram. A tip on the page links to the raw `.mmd` file for importing into
+  Excalidraw / Mermaid Live Editor.
+- **`*-diagram.mmd`** — the raw Mermaid flowchart. Drag it into
+  [mermaid.live](https://mermaid.live), or use Excalidraw's Mermaid plugin to
+  edit/export the diagram.
+- **`*-findings.html`** — summary cards, findings table (severity, resource,
+  fix), security group details, and route table details.
 
 ---
 
