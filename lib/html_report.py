@@ -126,34 +126,81 @@ _MERMAID_CONFIG = """
   });
 """
 
-# Interactive diagram script: renders the mermaid diagram, then wires up
+# Interactive diagram script: renders the mermaid diagram, makes the SVG fill
+# its container (Mermaid caps the element with an inline max-width and skips
+# viewBox, which left the diagram small in the top-left corner), then wires up
 # svg-pan-zoom for drag-to-pan and mouse-wheel/touch zoom, plus +/-/reset
 # controls.
+#
+# mermaid.render() is used here (not mermaid.run()) because run() keeps
+# mutating the rendered SVG after it resolves — re-applying max-width and
+# removing the viewBox we set — while render() returns a complete SVG string
+# that we own outright.
 _INTERACTIVE_INIT = """
-  mermaid.run({ querySelector: '.mermaid' }).then(function() {
+  function fitSvg(svg) {
+    // Drop Mermaid's inline constraints so the SVG fills its container.
+    svg.removeAttribute('style');
+    svg.removeAttribute('width');
+    svg.removeAttribute('height');
+    svg.style.width = '100%';
+    svg.style.height = '100%';
+    svg.style.display = 'block';
+    // svg-pan-zoom needs a viewBox; derive one from the content bounds if
+    // the generated SVG does not carry one.
+    if (!svg.getAttribute('viewBox')) {
+      var bb = svg.getBBox();
+      svg.setAttribute('viewBox',
+        bb.x + ' ' + bb.y + ' ' + Math.max(bb.width, 1) + ' ' + Math.max(bb.height, 1));
+    }
+    svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+  }
+
+  (function initDiagram() {
+    var pre = document.querySelector('pre.mermaid');
     var box = document.querySelector('.diagram-box');
-    var svg = box && box.querySelector('svg');
-    if (!svg || typeof svgPanZoom === 'undefined') return;
+    if (!pre || !box || typeof svgPanZoom === 'undefined') return;
 
-    var pan = svgPanZoom(svg, {
-      zoomEnabled: true,
-      controlIconsEnabled: false,
-      fit: true,
-      contain: false,
-      center: true,
-      minZoom: 0.2,
-      maxZoom: 15,
-      dblClickZoomEnabled: true,
-      mouseWheelZoomEnabled: true,
-      preventMouseEventsDefault: false,
+    mermaid.render('archdiagram', pre.textContent).then(function(res) {
+      // Adopt the SVG fully; mermaid.render() gives us a complete SVG string
+      // so nothing will re-mutate it afterwards.
+      var div = document.createElement('div');
+      div.innerHTML = res.svg;
+      var svg = div.firstElementChild;
+      if (!svg) return;
+      box.removeChild(pre);
+      box.appendChild(svg);
+      fitSvg(svg);
+
+      var pan = svgPanZoom(svg, {
+        zoomEnabled: true,
+        controlIconsEnabled: false,
+        fit: true,
+        contain: false,
+        center: true,
+        minZoom: 0.2,
+        maxZoom: 15,
+        dblClickZoomEnabled: true,
+        mouseWheelZoomEnabled: true,
+        preventMouseEventsDefault: false,
+      });
+      pan.resize();
+      pan.fit();
+      pan.center();
+
+      svg.addEventListener('mousedown', function(){ svg.classList.add('panning'); });
+      svg.addEventListener('mouseup', function(){ svg.classList.remove('panning'); });
+
+      var zin = document.getElementById('zoom-in');
+      var zout = document.getElementById('zoom-out');
+      var zreset = document.getElementById('zoom-reset');
+      if (zin) zin.addEventListener('click', function(){ pan.zoomIn(); });
+      if (zout) zout.addEventListener('click', function(){ pan.zoomOut(); });
+      if (zreset) zreset.addEventListener('click', function(){
+        pan.resize(); pan.fit(); pan.center();
+      });
+      window.addEventListener('resize', function(){ pan.resize(); });
     });
-    svg.addEventListener('mousedown', function(){ svg.classList.add('panning'); });
-    svg.addEventListener('mouseup', function(){ svg.classList.remove('panning'); });
-
-    document.getElementById('zoom-in').addEventListener('click', function(){ pan.zoomIn(); });
-    document.getElementById('zoom-out').addEventListener('click', function(){ pan.zoomOut(); });
-    document.getElementById('zoom-reset').addEventListener('click', function(){ pan.reset(); });
-  });
+  })();
 """
 
 
