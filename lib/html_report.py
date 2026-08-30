@@ -49,22 +49,6 @@ _CSS = """
                 color: var(--muted); margin-top: 4px; }
   .issue-high { color: var(--high); } .issue-medium { color: var(--medium); }
   .issue-low { color: var(--low); }
-  .diagram-box { position: relative; background: #fff; border-radius: 12px;
-                 overflow: hidden; border: 1px solid #334155;
-                 height: calc(100vh - 300px); min-height: 480px; }
-  .diagram-box svg { width: 100%; height: 100%; display: block; cursor: grab; }
-  .diagram-box svg.panning { cursor: grabbing; }
-  .zoom-controls { position: absolute; top: 10px; right: 10px; z-index: 10;
-                   display: flex; flex-direction: column; gap: 6px; }
-  .zoom-controls button { width: 36px; height: 36px; border-radius: 8px;
-       border: 1px solid #334155; background: #fff; color: #0f172a;
-       font-size: 18px; font-weight: 700; cursor: pointer; line-height: 1;
-       box-shadow: 0 2px 6px rgba(0,0,0,.25); }
-  .zoom-controls button:hover { background: #e2e8f0; }
-  .zoom-hint { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%);
-       z-index: 10; font-size: 12px; color: #475569; background: rgba(255,255,255,.9);
-       padding: 4px 10px; border-radius: 999px; border: 1px solid #cbd5e1;
-       box-shadow: 0 1px 4px rgba(0,0,0,.15); }
   .badge { padding: 3px 8px; border-radius: 6px; font-size: 11px;
            font-weight: 700; color: #fff; }
   .badge-high { background: var(--high); }
@@ -99,11 +83,69 @@ _CSS = """
   .empty { color: var(--muted); font-size: 13px; }
   @media print {
     body { background: #fff; color: #000; }
-    .diagram-box { border: 1px solid #ccc; }
     header { background: #fff; color: #000; border-bottom: 1px solid #ccc; }
     table { border-color: #ccc; }
     th, td { border-color: #ccc; }
     tr:nth-child(even) td { background: #f3f4f6; }
+  }
+"""
+
+# Immersive stylesheet for the interactive diagram page: a slim toolbar on top
+# and the diagram filling the rest of the window (no header/footer/frills
+# stealing vertical space from the viewport).
+_DIAGRAM_CSS = """
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: #0f172a; color: #e2e8f0; line-height: 1.5;
+    overflow: hidden;
+  }
+  .toolbar {
+    height: 44px; display: flex; align-items: center;
+    justify-content: space-between; gap: 12px;
+    padding: 0 12px 0 16px;
+    background: #1e293b; border-bottom: 1px solid #334155;
+  }
+  .toolbar-left { min-width: 0; }
+  .title { font-size: 14px; font-weight: 600; line-height: 1.2; }
+  .sub { color: #94a3b8; font-size: 11px; margin-top: 1px; }
+  .sub code {
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    background: #2a3a52; padding: 0 4px; border-radius: 4px; color: #e2e8f0;
+  }
+  .zoom-controls { display: flex; gap: 6px; flex-shrink: 0; }
+  .zoom-controls button {
+    width: 34px; height: 34px; border-radius: 8px;
+    border: 1px solid #475569; background: #2a3a52; color: #e2e8f0;
+    font-size: 17px; font-weight: 700; cursor: pointer; line-height: 1;
+  }
+  .zoom-controls button:hover { background: #334155; }
+  .diagram-box {
+    position: fixed; top: 44px; left: 0; right: 0; bottom: 0;
+    background: #fff; overflow: hidden;
+  }
+  .diagram-box svg { width: 100%; height: 100%; display: block; cursor: grab; }
+  .diagram-box svg.panning { cursor: grabbing; }
+  .zoom-hint {
+    position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%);
+    z-index: 10; font-size: 12px; color: #475569;
+    background: rgba(255,255,255,.92); padding: 4px 10px; border-radius: 999px;
+    border: 1px solid #cbd5e1; box-shadow: 0 1px 4px rgba(0,0,0,.15);
+    white-space: nowrap; pointer-events: none;
+  }
+  .tip-link {
+    position: absolute; bottom: 12px; right: 14px; z-index: 10;
+    font-size: 11px; color: #64748b; background: rgba(255,255,255,.85);
+    padding: 3px 8px; border-radius: 6px; border: 1px solid #cbd5e1;
+    pointer-events: none;
+  }
+  .tip-link a { color: #2563eb; }
+  .tip-link code { font-family: ui-monospace, SFMono-Regular, monospace; }
+  @media (max-width: 720px) {
+    .sub { display: none; }
+    .tip-link { display: none; }
+    .zoom-hint { display: none; }
   }
 """
 
@@ -314,39 +356,49 @@ class ReportWriter:
     # 1. PURE DIAGRAM (primary output)
     # ------------------------------------------------------------------
     def render_diagram_html(self, path, mmd_path):
-        """Write a minimal HTML page containing only the interactive diagram."""
+        """Write the interactive architecture diagram as an immersive
+        full-viewport page (slim toolbar + diagram filling the window)."""
         mmd_name = os.path.basename(mmd_path)
-        body = f"""
-  <h2>🏗️ Architecture Diagram</h2>
-  <p class="muted">Interactive map of VPCs, subnets, resources and their
-  connectivity. <b>Red nodes/edges</b> highlight high-severity findings.
-  <b>Drag</b> to pan and use the <b>mouse wheel</b> or the buttons to zoom.</p>
-  <div class="diagram-box">
+        css = _DIAGRAM_CSS
+        body = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VPC Architecture Diagram</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js"></script>
+<style>
+{css}
+</style>
+</head>
+<body>
+  <div class="toolbar">
+    <div class="toolbar-left">
+      <div class="title">🏗️ VPC Architecture Diagram</div>
+      <div class="sub">{esc(self._now())} · {esc(self._region_summary())} · vpc-archmapper
+        · mmd: <code>{esc(mmd_name)}</code></div>
+    </div>
     <div class="zoom-controls">
       <button id="zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
       <button id="zoom-out" title="Zoom out" aria-label="Zoom out">−</button>
       <button id="zoom-reset" title="Reset view" aria-label="Reset view">⟲</button>
     </div>
+  </div>
+  <div class="diagram-box">
     <pre class="mermaid">
 {self.mermaid_code}
     </pre>
-    <div class="zoom-hint">Drag to pan · scroll to zoom · buttons to control</div>
+    <div class="zoom-hint">Drag to pan · scroll to zoom · double-click to zoom in</div>
+    <div class="tip-link">Import this diagram elsewhere via the <code>.mmd</code> file on disk or <a href="https://mermaid.live" target="_blank" rel="noopener">mermaid.live</a>.</div>
   </div>
-  <div class="tip">
-    💡 <b>Import into other tools:</b> the raw diagram code is shipped alongside
-    this page as <code>{esc(mmd_name)}</code>. Open it in the
-    <a href="https://mermaid.live">Mermaid Live Editor</a>, Mermaid Ink, or
-    Excalidraw (via the Mermaid plugin) to edit or export the diagram.
-  </div>
-"""
-        doc = _page(
-            "VPC Architecture Diagram",
-            f"Generated {self._now()} · {self._region_summary()} · vpc-archmapper",
-            body,
-            active_scripts=True,
-            interactive=True,
-        )
-        _write(doc, path)
+  <script>
+{_MERMAID_CONFIG}
+{_INTERACTIVE_INIT}
+  </script>
+</body>
+</html>"""
+        _write(body, path)
         return path
 
     # ------------------------------------------------------------------
