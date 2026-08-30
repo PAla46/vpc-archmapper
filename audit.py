@@ -111,7 +111,6 @@ def main():
 
     regions = resolve_regions(args.region)
 
-    print("Discovering networking resources...")
     discovery = AWSDiscovery(session=session, regions=regions)
     data = discovery.run()
 
