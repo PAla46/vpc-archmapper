@@ -3,7 +3,12 @@
 
 Scans all (or specified) regions for VPC networking resources, analyzes
 connectivity between resources, flags common misconfigurations, and produces
-a self-contained HTML report with an interactive Mermaid architecture diagram.
+three deliverables centred on the architecture diagram:
+
+  1. <ts>-diagram.html  - pure, interactive Mermaid architecture diagram (primary)
+  2. <ts>-diagram.mmd   - raw Mermaid code, importable into Excalidraw /
+                          Mermaid Live Editor / Mermaid Ink
+  3. <ts>-findings.html - security findings & audit detail (secondary)
 
 Requires read-only IAM permissions only. Runs natively in AWS CloudShell
 (boto3 is pre-installed) or locally with `pip install boto3`.
@@ -37,7 +42,7 @@ from lib.discovery import AWSDiscovery  # noqa: E402
 from lib.analysis import NetworkAnalyzer  # noqa: E402
 from lib.issues import IssueDetector  # noqa: E402
 from lib.mermaid import MermaidGenerator  # noqa: E402
-from lib.html_report import HTMLReport  # noqa: E402
+from lib.html_report import ReportWriter  # noqa: E402
 
 BANNER = r"""
 =====================================================================
@@ -59,8 +64,9 @@ def parse_args():
     parser.add_argument(
         "--output",
         default="output",
-        help="Output directory (default: ./output). The report is written as "
-        "audit-report-<timestamp>.html inside this directory.",
+        help="Output directory (default: ./output). Writes three files: "
+        "<ts>-diagram.html (pure diagram), <ts>-diagram.mmd (raw Mermaid code), "
+        "and <ts>-findings.html (security findings).",
     )
     parser.add_argument(
         "--profile",
@@ -143,16 +149,25 @@ def main():
     mermaid_code = mermaid.generate()
 
     os.makedirs(args.output, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    output_path = os.path.join(args.output, f"audit-report-{timestamp}.html")
+    base = os.path.join(args.output, f"vpc-archmap-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
 
-    print("Writing HTML report...")
-    report = HTMLReport(data, analyzer, issues, mermaid_code, output_path)
-    report.render()
+    diagram_html = f"{base}-diagram.html"
+    findings_html = f"{base}-findings.html"
+    mermaid_file = f"{base}-diagram.mmd"
+
+    writer = ReportWriter(data, analyzer, issues, mermaid_code)
+
+    print("Writing diagram (primary output)...")
+    writer.render_diagram_html(diagram_html, mermaid_file)
+
+    print("Writing raw Mermaid code...")
+    writer.render_mermaid_code(mermaid_file)
+
+    print("Writing findings (secondary output)...")
+    writer.render_findings_html(findings_html)
 
     print("\n" + "=" * 69)
     print("  ✓ Audit complete!")
-    print(f"  Report:  {os.path.abspath(output_path)}")
     print(f"  Regions: {', '.join(data['regions'])}")
     print(f"  VPCs:    {len(data['vpcs'])}")
     print(f"  Issues:  {len(issues)}"
@@ -160,7 +175,12 @@ def main():
           f" medium={sum(1 for i in issues if i.severity=='medium')},"
           f" low={sum(1 for i in issues if i.severity=='low')})")
     print("=" * 69)
-    print("\nOpen the HTML file in a browser to view the interactive diagram.")
+    print("\nDeliverables:")
+    print(f"  🏗️  Diagram (primary):  {os.path.abspath(diagram_html)}")
+    print(f"  🔀 Mermaid code:       {os.path.abspath(mermaid_file)}")
+    print(f"  🔍 Findings (secondary): {os.path.abspath(findings_html)}")
+    print("\nOpen the diagram HTML in a browser. Import the .mmd file into "
+          "Mermaid Live Editor / Excalidraw to edit or export.")
 
 
 if __name__ == "__main__":
