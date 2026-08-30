@@ -379,12 +379,12 @@ class ReportWriter:
     def render_mermaid_code(self, path):
         """Write a raw .mmd file containing only the Mermaid flowchart markup.
 
-        The fence markers (```mermaid ... ```) are stripped so the file holds
-        pure Mermaid syntax — directly importable into the Mermaid Live Editor,
-        Mermaid Ink, and Excalidraw (via its Mermaid plugin).
+        The markup ships fence-free (the generator emits raw Mermaid), so the
+        file is directly importable into the Mermaid Live Editor, Mermaid Ink,
+        and Excalidraw (via its Mermaid plugin).
         """
         code = self.mermaid_code.strip()
-        # Remove leading/trailing markdown fences if present.
+        # Defensive: strip any markdown fences that may have slipped through.
         if code.startswith("```"):
             code = code.split("\n", 1)[1] if "\n" in code else ""
         if code.rstrip().endswith("```"):

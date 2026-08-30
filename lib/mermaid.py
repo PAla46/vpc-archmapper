@@ -97,14 +97,56 @@ class MermaidGenerator:
         return f'{nid}["{inner}"]'
 
     # ------------------------------------------------------------------
+    def _igw_label(self, igw):
+        return "🌐 Internet Gateway " + (igw["id"] if igw["id"] else "")
+
+    def _route_label(self, rt):
+        dests = []
+        for r in rt["routes"]:
+            if r.get("is_local") and r.get("state") == "active":
+                continue
+            dests.append(r.get("cidr", "?") + " → " + r.get("target", "?"))
+        if not dests:
+            return f"RT {rt['id']}"
+        return f"RT {rt['id']} · " + ", ".join(dests)
+
+    # ------------------------------------------------------------------
     def generate(self):
-        lines = ["```mermaid", "graph TB"]
+        """Return the raw Mermaid flowchart markup (no markdown fences).
+
+        Fences are intentionally omitted: the consumer decides presentation.
+        The HTML page embeds this raw text in a `<pre class="mermaid">` block,
+        and the `.mmd` file ships it verbatim for Excalidraw / Mermaid Live.
+        """
+        lines = ["graph TB"]
         declared_nodes = set()
+
+        igw_by_vpc = {}
+        for igw in self.data["internet_gateways"].values():
+            igw_by_vpc.setdefault(igw["vpc_id"], []).append(igw)
+
+        rt_by_vpc = {}
+        for rt in self.data["route_tables"].values():
+            rt_by_vpc.setdefault(rt["vpc_id"], []).append(rt)
 
         for i, vpc in enumerate(self.data["vpcs"].values()):
             vnode = "VPC_" + _nid(vpc["id"])
             vlabel = f"{vpc['name'] or vpc['id']} ({vpc['cidr']})"
             color = self._vpc_color(i)
+
+            vpc_nodes = [
+                (nid, node)
+                for nid, node in self.analysis._resource_nodes.items()
+                if node.get("vpc_id") == vpc["id"]
+            ]
+            vpc_igws = igw_by_vpc.get(vpc["id"], [])
+            vpc_rts = rt_by_vpc.get(vpc["id"], [])
+
+            # Skip VPCs that have nothing to render — avoids empty boxes and
+            # keeps the diagram clean/valid.
+            if not vpc_nodes and not vpc_igws and not vpc_rts:
+                continue
+
             lines.append(
                 f'    subgraph {vnode}["{_esc(vlabel)}"]'
             )
@@ -113,12 +155,7 @@ class MermaidGenerator:
                 "stroke-width:1px"
             )
 
-            vpc_nodes = [
-                (nid, node)
-                for nid, node in self.analysis._resource_nodes.items()
-                if node.get("vpc_id") == vpc["id"]
-            ]
-
+            # Resource nodes grouped by subnet.
             subnet_groups = {}
             for nid, node in vpc_nodes:
                 key = node.get("subnet_id") or "NONE"
@@ -143,7 +180,7 @@ class MermaidGenerator:
                 snode = "SN_" + _nid(key)
                 public_tag = "🔓 Public" if node.get("is_public") else "🔒 Private"
                 subnet_label = f"{subnet.get('name') or subnet['id']} · {public_tag}"
-                lines.append(f"        subgraph {snode}[\"{_esc(subnet_label)}\"]")
+                lines.append(f'        subgraph {snode}["{_esc(subnet_label)}"]')
                 lines.append(
                     "            style " + snode + " fill:#ffffff,stroke:#cbd5e1"
                 )
@@ -151,19 +188,33 @@ class MermaidGenerator:
                     self._emit_node(lines, nid, n, indent=3)
                     declared_nodes.add(nid)
                 lines.append("        end")
-            lines.append("    end")
 
-        # Internet gateways
-        igw_edges = []
-        for igw in self.data["internet_gateways"].values():
-            igw_id = "IGW_" + _nid(igw["id"])
-            if igw_id not in declared_nodes:
-                lines.append(f'    {igw_id}["🌐 IGW {_esc(igw["id"])}"]')
+            # Internet gateways — nest inside their VPC so it isn't an empty box
+            # and the VPC's internet attachment is visible.
+            for igw in vpc_igws:
+                igw_id = "IGW_" + _nid(igw["id"])
+                if igw_id not in declared_nodes:
+                    lines.append(f'        {igw_id}["{self._igw_label(igw)}"]')
+                    lines.append(
+                        "        style " + igw_id
+                        + " fill:#0ea5e9,stroke:#0369a1,color:#fff"
+                    )
+                    declared_nodes.add(igw_id)
+
+            # Route tables — the client explicitly wanted routings checked, so
+            # surface them as visible nodes inside the VPC.
+            for rt in vpc_rts:
+                rt_id = "RT_" + _nid(rt["id"])
+                if rt_id in declared_nodes:
+                    continue
+                declared_nodes.add(rt_id)
+                lines.append(f'        {rt_id}["{self._route_label(rt)}"]')
                 lines.append(
-                    f"    style {igw_id} fill:#0ea5e9,stroke:#0369a1,color:#fff"
+                    "        style " + rt_id
+                    + " fill:#f8fafc,stroke:#94a3b8,color:#334155"
                 )
-                declared_nodes.add(igw_id)
-            igw_edges.append((igw["vpc_id"], igw["id"]))
+
+            lines.append("    end")
 
         # Transit gateways
         for tgw in self.data["transit_gateways"].values():
@@ -230,17 +281,7 @@ class MermaidGenerator:
                     f"→ {_esc(dst_label)}\"| {dst_id}"
                 )
 
-        # IGW -> VPC edges
-        for vpc_id, igw_id in igw_edges:
-            vpc_proxy = "VPC_" + _nid(vpc_id)
-            igw_proxy = "IGW_" + _nid(igw_id)
-            if vpc_proxy in declared_nodes and igw_proxy in declared_nodes:
-                edge_lines.append(
-                    f'    {igw_proxy} -->|"🌐 Internet"| {vpc_proxy}'
-                )
-
         lines.extend(edge_lines)
-        lines.append("```")
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
