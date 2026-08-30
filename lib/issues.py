@@ -56,9 +56,29 @@ class IssueDetector:
     def _source_sg_owners(self, sg_id):
         return self.analysis._resource_sg_map.get(sg_id, [])
 
+    def _is_default_sg(self, sg):
+        """Return True if this is an AWS-managed default security group.
+
+        Every newly created VPC gets a 'default' security group. In the *default*
+        VPC this group is automatically configured to allow all self-inbound and
+        all outbound traffic. These rules are by-design and are not meaningful
+        findings, so they are excluded from misconfiguration checks.
+        """
+        if sg.get("name") != "default":
+            return False
+        vpc = self.data["vpcs"].get(sg.get("vpc_id", ""), {})
+        return bool(vpc.get("is_default"))
+
+    def _manageable_sgs(self):
+        """Yield security groups that are not AWS-managed default groups."""
+        for sg in self.data["security_groups"].values():
+            if self._is_default_sg(sg):
+                continue
+            yield sg
+
     def check_open_security_groups(self):
         """Flag any SG allowing ingress from 0.0.0.0/0 or ::/0."""
-        for sg in self.data["security_groups"].values():
+        for sg in self._manageable_sgs():
             for rule in sg["ingress"]:
                 for target in rule["targets"]:
                     if target["type"] == "cidr" and target["value"] in (
@@ -80,36 +100,39 @@ class IssueDetector:
                         )
 
     def check_all_protocol_rules(self):
-        """Flag SG rules allowing ALL protocols."""
-        for sg in self.data["security_groups"].values():
-            for direction in ("ingress", "egress"):
-                for rule in sg[direction]:
-                    if rule["protocol"] == "ALL":
-                        for target in rule["targets"]:
-                            if target["type"] == "cidr" and target["value"] in (
-                                "0.0.0.0/0",
-                                "::/0",
-                            ):
-                                owners = self._source_sg_owners(sg["id"])
-                                owner_desc = (
-                                    " (attached to: " + ", ".join(owners) + ")"
-                                    if owners
-                                    else ""
-                                )
-                                self.add(
-                                    "high",
-                                    sg["name"] or sg["id"],
-                                    "All-protocols rule",
-                                    f"{sg['name'] or sg['id']} allows ALL protocols "
-                                    f"from {target['value']} "
-                                    f"({direction}).{owner_desc}",
-                                    "Define granular protocol/port rules. "
-                                    "Only allow ip protocols needed by the workload.",
-                                )
+        """Flag SG rules allowing ALL protocols.
+
+        ALL-protocols *ingress* is a genuine high-risk finding (any host can
+        reach any port). ALL-protocols *egress* is common and lower risk; it is
+        reported separately by check_broad_egress, so we only flag ingress here.
+        """
+        for sg in self._manageable_sgs():
+            for rule in sg["ingress"]:
+                if rule["protocol"] == "ALL":
+                    for target in rule["targets"]:
+                        if target["type"] == "cidr" and target["value"] in (
+                            "0.0.0.0/0",
+                            "::/0",
+                        ):
+                            owners = self._source_sg_owners(sg["id"])
+                            owner_desc = (
+                                " (attached to: " + ", ".join(owners) + ")"
+                                if owners
+                                else ""
+                            )
+                            self.add(
+                                "high",
+                                sg["name"] or sg["id"],
+                                "All-protocols ingress from internet",
+                                f"{sg['name'] or sg['id']} allows ALL protocols "
+                                f"from {target['value']} (ingress).{owner_desc}",
+                                "Define granular protocol/port ingress rules. "
+                                "Only allow ip protocols needed by the workload.",
+                            )
 
     def check_broad_port_ranges(self):
         """Flag extremely broad port ranges (e.g. 1-65535) on non-open SGs."""
-        for sg in self.data["security_groups"].values():
+        for sg in self._manageable_sgs():
             for rule in sg["ingress"]:
                 frm = rule.get("from_port")
                 to = rule.get("to_port")
@@ -134,7 +157,7 @@ class IssueDetector:
 
     def check_open_ssh_rdp(self):
         """Flag SSH (22) or RDP (3389) open to the internet."""
-        for sg in self.data["security_groups"].values():
+        for sg in self._manageable_sgs():
             for rule in sg["ingress"]:
                 frm = rule.get("from_port")
                 to = rule.get("to_port")
@@ -218,9 +241,14 @@ class IssueDetector:
                     )
 
     def check_unused_security_groups(self):
-        """Flag security groups not attached to any discovered resource."""
+        """Flag security groups not attached to any discovered resource.
+
+        AWS-managed default SGs are excluded (every VPC has one whether or not
+        it is in use, so flagging them is pure noise).
+        """
         resource_sg_map = self.analysis._resource_sg_map
-        for sg_id, sg in self.data["security_groups"].items():
+        for sg in self._manageable_sgs():
+            sg_id = sg["id"]
             if sg_id not in resource_sg_map:
                 self.add(
                     "low",
@@ -256,8 +284,12 @@ class IssueDetector:
                         )
 
     def check_broad_egress(self):
-        """Flag SG egress rules open to all CIDRs (common but worth noting)."""
-        for sg in self.data["security_groups"].values():
+        """Flag SG egress rules open to all CIDRs (common but worth noting).
+
+        AWS-managed default SGs always allow ALL outbound and are excluded here;
+        only custom security groups are reported.
+        """
+        for sg in self._manageable_sgs():
             for rule in sg["egress"]:
                 for target in rule["targets"]:
                     if target["type"] == "cidr" and target["value"] in ("0.0.0.0/0", "::/0"):

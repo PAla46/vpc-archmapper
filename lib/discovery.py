@@ -21,10 +21,18 @@ CLIENT_CONFIG = Config(
     tcp_keepalive=True,
 )
 
-# Maximum number of results per page for paginated calls. Accounts with more
-# resources (e.g. thousands of instances/route tables) need pagination to be
-# fully enumerated instead of returning a single truncated page.
-PAGE_SIZE = 200
+# Maximum number of results per page for paginated calls. Use a value that is
+# valid across *all* the APIs we call. EC2's describe_route_tables,
+# describe_network_acls and RDS/ElastiCache's describe_db_instances /
+# describe_cache_clusters all cap at 100, so 100 is the safe universal choice.
+# (Some EC2 calls support up to 1000, but using 100 everywhere avoids
+# InvalidParameterValue failures and still paginates large accounts.)
+PAGE_SIZE = 100
+
+# APIs where the paginator rejects PageSize/MaxResults entirely; fall back to
+# default server-side pagination for these.
+# (Currently unused, kept for clarity; the robust fallback in _paginate handles
+#  any rejection at runtime.)
 
 
 class DiscoveryError(Exception):
@@ -114,22 +122,37 @@ class AWSDiscovery:
     def _paginate(self, client, op_name, result_key):
         """Yield every item across all pages of a paginated API call.
 
-        Handles both real paginators and our own NextToken-style fallback.
-        All collected items are returned as a list.
+        Uses server-side pagination where supported. If the requested page size
+        is rejected (some APIs cap MaxResults lower than others), retries once
+        with default pagination so enumeration still completes.
         """
-        try:
+        def run(page_config):
             paginator = client.get_paginator(op_name)
             items = []
-            for page in paginator.paginate(PaginationConfig={
-                "PageSize": PAGE_SIZE,
-            }):
+            for page in paginator.paginate(PaginationConfig=page_config):
                 items.extend(page.get(result_key, []))
-            return items, None
-        except (ClientError, Exception) as exc:
-            if isinstance(exc, ClientError):
-                code = exc.response.get("Error", {}).get("Code", "Unknown")
-                if code in ("AccessDenied", "UnauthorizedOperation", "OptInRequired"):
-                    return None, f"Access denied ({code})"
+            return items
+
+        try:
+            return run({"PageSize": PAGE_SIZE}), None
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "Unknown")
+            if code in ("AccessDenied", "UnauthorizedOperation", "OptInRequired"):
+                return None, f"Access denied ({code})"
+            # Retry once with default page size to handle MaxResults limits that
+            # are smaller than PAGE_SIZE on some services/regions.
+            if code in ("InvalidParameterValue", "ValidationError", "InvalidParameter"):
+                try:
+                    return run({}), None
+                except ClientError as exc2:
+                    code2 = exc2.response.get("Error", {}).get("Code", "Unknown")
+                    if code2 in ("AccessDenied", "UnauthorizedOperation", "OptInRequired"):
+                        return None, f"Access denied ({code2})"
+                    return None, str(exc2)
+                except Exception as exc2:
+                    return None, str(exc2)
+            return None, str(exc)
+        except Exception as exc:
             return None, str(exc)
 
     def _vpc_summary(self, vpc, region):
