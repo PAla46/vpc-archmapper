@@ -144,9 +144,10 @@ vpc-archmapper/
 
 ## 🖥️ Output
 
-- **`*-diagram.html`** — open in any browser for the interactive architecture
-  diagram. A tip on the page links to the raw `.mmd` file for importing into
-  Excalidraw / Mermaid Live Editor.
+- **`*-diagram.html`** — open in any browser for the **interactive**
+  architecture diagram. **Drag to pan**, **mouse wheel / touch to zoom**, and
+  use the +/−/reset buttons on the corner. A tip on the page links to the raw
+  `.mmd` file for importing into Excalidraw / Mermaid Live Editor.
 - **`*-diagram.mmd`** — the raw Mermaid flowchart. Drag it into
   [mermaid.live](https://mermaid.live), or use Excalidraw's Mermaid plugin to
   edit/export the diagram.

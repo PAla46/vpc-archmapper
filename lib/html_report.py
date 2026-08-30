@@ -49,9 +49,22 @@ _CSS = """
                 color: var(--muted); margin-top: 4px; }
   .issue-high { color: var(--high); } .issue-medium { color: var(--medium); }
   .issue-low { color: var(--low); }
-  .diagram-box { background: #fff; border-radius: 12px; padding: 16px;
-                 overflow-x: auto; border: 1px solid #334155; }
-  .diagram-box svg { max-width: 100%; }
+  .diagram-box { position: relative; background: #fff; border-radius: 12px;
+                 overflow: hidden; border: 1px solid #334155;
+                 height: calc(100vh - 300px); min-height: 480px; }
+  .diagram-box svg { width: 100%; height: 100%; display: block; cursor: grab; }
+  .diagram-box svg.panning { cursor: grabbing; }
+  .zoom-controls { position: absolute; top: 10px; right: 10px; z-index: 10;
+                   display: flex; flex-direction: column; gap: 6px; }
+  .zoom-controls button { width: 36px; height: 36px; border-radius: 8px;
+       border: 1px solid #334155; background: #fff; color: #0f172a;
+       font-size: 18px; font-weight: 700; cursor: pointer; line-height: 1;
+       box-shadow: 0 2px 6px rgba(0,0,0,.25); }
+  .zoom-controls button:hover { background: #e2e8f0; }
+  .zoom-hint { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%);
+       z-index: 10; font-size: 12px; color: #475569; background: rgba(255,255,255,.9);
+       padding: 4px 10px; border-radius: 999px; border: 1px solid #cbd5e1;
+       box-shadow: 0 1px 4px rgba(0,0,0,.15); }
   .badge { padding: 3px 8px; border-radius: 6px; font-size: 11px;
            font-weight: 700; color: #fff; }
   .badge-high { background: var(--high); }
@@ -94,9 +107,9 @@ _CSS = """
   }
 """
 
-_MERMAID_INIT = """
+_MERMAID_CONFIG = """
   mermaid.initialize({
-    startOnLoad: true,
+    startOnLoad: false,
     theme: 'base',
     themeVariables: {
       fontFamily: 'ui-monospace, SFMono-Regular, monospace',
@@ -113,19 +126,61 @@ _MERMAID_INIT = """
   });
 """
 
+# Interactive diagram script: renders the mermaid diagram, then wires up
+# svg-pan-zoom for drag-to-pan and mouse-wheel/touch zoom, plus +/-/reset
+# controls.
+_INTERACTIVE_INIT = """
+  mermaid.run({ querySelector: '.mermaid' }).then(function() {
+    var box = document.querySelector('.diagram-box');
+    var svg = box && box.querySelector('svg');
+    if (!svg || typeof svgPanZoom === 'undefined') return;
+
+    var pan = svgPanZoom(svg, {
+      zoomEnabled: true,
+      controlIconsEnabled: false,
+      fit: true,
+      contain: false,
+      center: true,
+      minZoom: 0.2,
+      maxZoom: 15,
+      dblClickZoomEnabled: true,
+      mouseWheelZoomEnabled: true,
+      preventMouseEventsDefault: false,
+    });
+    svg.addEventListener('mousedown', function(){ svg.classList.add('panning'); });
+    svg.addEventListener('mouseup', function(){ svg.classList.remove('panning'); });
+
+    document.getElementById('zoom-in').addEventListener('click', function(){ pan.zoomIn(); });
+    document.getElementById('zoom-out').addEventListener('click', function(){ pan.zoomOut(); });
+    document.getElementById('zoom-reset').addEventListener('click', function(){ pan.reset(); });
+  });
+"""
+
 
 def esc(text):
     return html.escape(str(text or ""), quote=True)
 
 
-def _page(title, sub, body, active_scripts=True):
-    scripts = (
-        '<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>'
-        if active_scripts
-        else ""
-    )
-    # Only run mermaid.initialize when the mermaid CDN is actually loaded.
-    init_script = f"<script>\n{_MERMAID_INIT}\n</script>" if active_scripts else ""
+def _page(title, sub, body, active_scripts=True, interactive=False):
+    scripts = ""
+    if active_scripts:
+        scripts = (
+            '<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>'
+        )
+        if interactive:
+            scripts += (
+                '<script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/'
+                'dist/svg-pan-zoom.min.js"></script>'
+            )
+    # Only run a script when the relevant CDN/CDNs are actually loaded.
+    init_script = ""
+    if active_scripts:
+        if interactive:
+            init_script = (
+                "<script>\n" + _MERMAID_CONFIG + "\n" + _INTERACTIVE_INIT + "\n</script>"
+            )
+        else:
+            init_script = f"<script>\n{_MERMAID_CONFIG}\n</script>"
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -218,11 +273,17 @@ class ReportWriter:
   <h2>🏗️ Architecture Diagram</h2>
   <p class="muted">Interactive map of VPCs, subnets, resources and their
   connectivity. <b>Red nodes/edges</b> highlight high-severity findings.
-  Pan and zoom with your mouse or trackpad.</p>
+  <b>Drag</b> to pan and use the <b>mouse wheel</b> or the buttons to zoom.</p>
   <div class="diagram-box">
+    <div class="zoom-controls">
+      <button id="zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
+      <button id="zoom-out" title="Zoom out" aria-label="Zoom out">−</button>
+      <button id="zoom-reset" title="Reset view" aria-label="Reset view">⟲</button>
+    </div>
     <pre class="mermaid">
 {self.mermaid_code}
     </pre>
+    <div class="zoom-hint">Drag to pan · scroll to zoom · buttons to control</div>
   </div>
   <div class="tip">
     💡 <b>Import into other tools:</b> the raw diagram code is shipped alongside
@@ -236,6 +297,7 @@ class ReportWriter:
             f"Generated {self._now()} · {self._region_summary()} · vpc-archmapper",
             body,
             active_scripts=True,
+            interactive=True,
         )
         _write(doc, path)
         return path
